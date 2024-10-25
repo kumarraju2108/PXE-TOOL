@@ -38,6 +38,7 @@ dhcp_range_start=$(prompt "Enter the DHCP range start" "192.168.1.100")
 dhcp_range_end=$(prompt "Enter the DHCP range end" "192.168.1.200")
 router_ip=$(prompt "Enter the gateway/router IP" "192.168.1.1")
 dns_server_ip=$(prompt "Enter the DNS server IP" "$router_ip")
+dhcp_interface=$(prompt "Enter the network interface for DHCP (e.g., eth0)" "eth0")
 
 # Ask for the Ubuntu ISO file name
 read -p "Enter the name of the Ubuntu ISO file in the Downloads folder (e.g., ubuntu-22.04-live-server-amd64.iso): " iso_file
@@ -66,6 +67,9 @@ subnet $subnet netmask $subnet_mask {
   filename "pxelinux.0";
 }
 EOL
+
+# Specify the DHCP interface
+sudo sed -i "s/INTERFACESv4=\"\"/INTERFACESv4=\"$dhcp_interface\"/" /etc/default/isc-dhcp-server
 
 # Restart DHCP server
 echo "Restarting DHCP server..."
