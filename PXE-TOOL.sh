@@ -6,14 +6,15 @@ prompt() {
   echo "${input:-$2}"
 }
 
-# Function to check if a port is in use
-check_port_in_use() {
+# Function to check if a port is in use and stop the service if it is
+check_and_stop_service() {
   local port=$1
+  local service=$2
   if sudo lsof -i :$port > /dev/null; then
-    echo "Warning: Port $port is already in use. Continuing if it's the required service."
-    return 1
+    echo "Port $port is already in use by the $service service."
+    echo "Stopping the $service service..."
+    sudo systemctl stop "$service"
   fi
-  return 0
 }
 
 # Function to set up Ubuntu OS from the specified ISO
@@ -28,34 +29,37 @@ setup_ubuntu() {
   sudo mount -o loop ~/Downloads/"$iso_file" /var/lib/tftpboot/$os_name-installer
 }
 
-# Default values
-pxe_server_ip="192.168.1.10"
-subnet="192.168.1.0"
-subnet_mask="255.255.255.0"
-dhcp_range_start="192.168.1.100"
-dhcp_range_end="192.168.1.200"
-router_ip="192.168.1.1"
-dns_server_ip="192.168.1.1"
-
-echo "PXE Server Setup Script"
-
 # Ask for the network interface name
-dhcp_interface=$(prompt "Enter the network interface name (e.g., eth0)" "eth0")
+dhcp_interface=$(prompt "Enter the network interface name (e.g., ens33)" "ens33")
 
-# Check if the specified interface exists
-if ! ip link show "$dhcp_interface" > /dev/null; then
-  echo "Error: Network interface '$dhcp_interface' does not exist."
+# Get the IP address and subnet mask of the specified interface
+ip_address=$(ip -o -f inet addr show "$dhcp_interface" | awk '{print $4}')
+subnet_mask=$(ip -o -f inet addr show "$dhcp_interface" | awk '{print $2}')
+
+# Check if the specified interface exists and has an IP
+if [[ -z "$ip_address" ]]; then
+  echo "Error: Network interface '$dhcp_interface' does not have an IP address assigned."
   exit 1
 fi
+
+# Default values for DHCP
+pxe_server_ip=$ip_address
+subnet="${ip_address%.*}.0" # Assuming /24 for the subnet
+dhcp_range_start="${subnet%.*}.100"
+dhcp_range_end="${subnet%.*}.200"
+router_ip=$ip_address
+dns_server_ip=$ip_address
+
+echo "PXE Server Setup Script"
 
 # Ask for the Ubuntu ISO file name
 read -p "Enter the name of the Ubuntu ISO file in the Downloads folder (e.g., ubuntu-22.04-live-server-amd64.iso): " iso_file
 
-# Check for port conflicts
+# Check for and stop services if they are using the required ports
 echo "Checking for port conflicts..."
-check_port_in_use 67    # DHCP uses port 67
-check_port_in_use 69    # TFTP uses port 69
-check_port_in_use 2049  # NFS uses port 2049
+check_and_stop_service 67    "isc-dhcp-server"  # DHCP uses port 67
+check_and_stop_service 69    "tftpd-hpa"        # TFTP uses port 69
+check_and_stop_service 2049  "nfs-kernel-server" # NFS uses port 2049
 
 # Update system and install required packages
 echo "Updating system and installing required packages..."
@@ -125,29 +129,6 @@ LABEL install
   APPEND initrd=$os_name-installer/$initrd_path -- boot=casper netboot=nfs nfsroot=$pxe_server_ip:/var/lib/tftpboot/$os_name-installer
 EOL
 
-# Create client-side IP check script
-client_script_path="/var/lib/tftpboot/ip_check.sh"
-sudo tee "$client_script_path" > /dev/null <<'EOL'
-#!/bin/bash
-
-# Check if an IP address is assigned
-ip_address=$(hostname -I | awk '{print $1}')
-
-if [[ -z "$ip_address" ]]; then
-  echo "No IP address assigned."
-else
-  echo "IP address assigned: $ip_address"
-  echo "Node details:"
-  echo "Hostname: $(hostname)"
-  echo "MAC Address: $(cat /sys/class/net/$(ip -o -f inet link show | awk '{print $2}')/address)"
-fi
-EOL
-
-# Make the client script executable
-sudo chmod +x "$client_script_path"
-
 # Final instructions
 echo "PXE server setup complete!"
 echo "You can now boot your client nodes from the network and start the $os_name OS installation."
-echo "To check the assigned IP address and node details, use the script at $client_script_path on the client machine."
-
