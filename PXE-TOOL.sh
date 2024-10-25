@@ -29,6 +29,33 @@ setup_ubuntu() {
   sudo mount -o loop ~/Downloads/"$iso_file" /var/lib/tftpboot/$os_name-installer
 }
 
+# Function to wait for client installation to complete
+wait_for_client_installation() {
+  local client_ip=$1
+  local timeout=600  # Timeout in seconds
+  local interval=10   # Check every 10 seconds
+  local elapsed=0
+
+  echo "Waiting for client installation to complete..."
+
+  while [[ $elapsed -lt $timeout ]]; do
+    if ping -c 1 "$client_ip" &> /dev/null; then
+      echo "Client is reachable. Checking installation status..."
+      # Here you could add more checks specific to your installation process.
+      # For example, checking for a specific service, log file, or state.
+      break
+    fi
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+
+  if [[ $elapsed -ge $timeout ]]; then
+    echo "Timeout: Client installation did not complete within $timeout seconds."
+  else
+    echo "Client installation is ongoing."
+  fi
+}
+
 # Ask for the network interface name
 dhcp_interface=$(prompt "Enter the network interface name (e.g., ens33)" "ens33")
 
@@ -128,6 +155,12 @@ LABEL install
   KERNEL $os_name-installer/$kernel_path
   APPEND initrd=$os_name-installer/$initrd_path -- boot=casper netboot=nfs nfsroot=$pxe_server_ip:/var/lib/tftpboot/$os_name-installer
 EOL
+
+# Ask for client IP address to monitor
+client_ip=$(prompt "Enter the client IP address to monitor during installation" "$dhcp_range_start")
+
+# Wait for client installation to complete
+wait_for_client_installation "$client_ip"
 
 # Final instructions
 echo "PXE server setup complete!"
