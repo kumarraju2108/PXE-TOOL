@@ -1,126 +1,147 @@
 #!/bin/bash
 
-# Function to check if a port is in use
-check_port() {
-    local port=$1
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null; then
-        echo "Port $port is already in use. Exiting."
-        exit 1
-    fi
-}
+# Define the local OS images directory within the PXE folder structure
+local_images_dir="/var/lib/tftpboot/local-os-images"
 
-# Function to ensure a package is installed
-install_package() {
-    package=$1
-    if ! dpkg -l | grep -qw $package; then
-        echo "Installing $package..."
-        sudo apt install -y $package
-    fi
-}
+# Prompt for interface name and IP address
+read -p "Enter the network interface name (e.g., eth0): " interface
+read -p "Enter the IP address of the PXE server (e.g., 192.168.1.100): " server_ip
 
-# Function to remove lock files (if necessary)
-remove_lock_files() {
-    echo "Removing lock files if they exist..."
-    sudo rm -f /var/lib/dpkg/lock-frontend
-    sudo rm -f /var/lib/dpkg/lock
-    sudo rm -f /var/cache/apt/archives/lock
-}
-
-# Function to check if dpkg is running
-check_dpkg_lock() {
-    while sudo lsof /var/lib/dpkg/lock-frontend >/dev/null; do
-        echo "Another package manager is running. Waiting..."
-        sleep 5
+# Function to check and install required services
+install_required_services() {
+    echo "Checking required services..."
+    for service in dnsmasq tftp-server httpd; do
+        if ! rpm -q $service; then
+            echo "Installing $service..."
+            sudo yum install -y $service
+        fi
+        sudo systemctl enable $service
+        sudo systemctl start $service
     done
 }
 
-# Check for package manager lock
-check_dpkg_lock
-
-# Check if necessary ports are available
-check_port 67  # DHCP
-check_port 69  # TFTP
-
-# Choose a different port for TFTP
-tftp_port=7777
-check_port $tftp_port
-
-# Prompt for user input
-read -p "Enter the network interface name (e.g., ens33): " interface
-read -p "Enter the server IP address (e.g., 172.17.199.199): " server_ip
-read -p "Enter the name of the ISO file to be saved (without extension): " iso_name
-
-# Install required packages
-install_package "isc-dhcp-server"
-install_package "tftpd-hpa"
-install_package "syslinux"
-
-# Backup existing configuration files
-dhcp_conf="/etc/dhcp/dhcpd.conf"
-tftp_conf="/etc/default/tftpd-hpa"
-
-sudo cp $dhcp_conf ${dhcp_conf}.bak
-sudo cp $tftp_conf ${tftp_conf}.bak
-
-# Generate DHCP configuration
-cat <<EOL | sudo tee $dhcp_conf
-subnet 172.17.0.0 netmask 255.255.0.0 {
-    range 172.17.199.200 172.17.199.250;
-    option domain-name-servers $server_ip, 8.8.8.8;
-    option subnet-mask 255.255.0.0;
-    option routers $server_ip;
-    option broadcast-address 172.17.255.255;
-    option ntp-servers 0.0.0.0;
-    next-server $server_ip;
-    filename "pxelinux.0";
+# Function to check and resolve port conflicts
+check_port_conflicts() {
+    ports=(69 80)
+    for port in "${ports[@]}"; do
+        if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null; then
+            echo "Port $port is in use. Attempting to find an alternative."
+            new_port=$((port + 1))
+            while lsof -Pi :$new_port -sTCP:LISTEN -t >/dev/null; do
+                new_port=$((new_port + 1))
+            done
+            echo "Port $port is busy. Assigning new port $new_port."
+            # Adjust dnsmasq and httpd configurations
+            if [ "$port" -eq 80 ]; then
+                sudo sed -i "s/^Listen 80$/Listen $new_port/" /etc/httpd/conf/httpd.conf
+            elif [ "$port" -eq 69 ]; then
+                sudo sed -i "s/^tftp-port=69$/tftp-port=$new_port/" /etc/dnsmasq.conf
+            fi
+        fi
+    done
 }
-EOL
 
-# Generate TFTP configuration
-cat <<EOL | sudo tee $tftp_conf
-TFTP_USERNAME="tftp"
-TFTP_DIRECTORY="/var/lib/tftpboot"
-TFTP_ADDRESS="0.0.0.0:$tftp_port"
-TFTP_OPTIONS="--secure"
-EOL
+# Function to process OS ISO
+process_os_iso() {
+    os_file=$1
+    os_name=$(basename "$os_file" .iso)
+    dest_dir="$local_images_dir/$os_name"
 
-# Create TFTP boot directory
-sudo mkdir -p /var/lib/tftpboot
-sudo cp /usr/lib/syslinux/pxelinux.0 /var/lib/tftpboot/
-sudo cp /usr/lib/syslinux/ldlinux.c32 /var/lib/tftpboot/
-sudo cp /usr/lib/syslinux/modules/bios/libutil.c32 /var/lib/tftpboot/
-sudo cp /usr/lib/syslinux/modules/bios/menu.c32 /var/lib/tftpboot/
-sudo mkdir -p /var/lib/tftpboot/pxelinux.cfg
-sudo touch /var/lib/tftpboot/pxelinux.cfg/default
+    # Check if the directory already exists
+    if [[ -d $dest_dir ]]; then
+        echo "Directory $dest_dir already exists. Please remove or rename it before adding a new OS."
+        exit 1
+    fi
 
-# Create PXE configuration file
-cat <<EOL | sudo tee /var/lib/tftpboot/pxelinux.cfg/default
-DEFAULT menu.c32
-PROMPT 0
-TIMEOUT 300
+    # Create directory for OS if it doesn't exist
+    mkdir -p "$dest_dir"
 
-LABEL linux
-    KERNEL ubuntu-installer/amd64/linux
-    APPEND initrd=ubuntu-installer/amd64/initrd.gz
-EOL
+    # Copy the OS ISO to the designated directory
+    echo "Copying $os_file to $dest_dir..."
+    cp "$os_file" "$dest_dir/$os_name.iso"
+}
 
-# Set up NFS (if needed)
-if [[ ! -d /var/nfs ]]; then
-    sudo mkdir -p /var/nfs
-    echo "/var/nfs 172.17.0.0/24(rw,sync,no_subtree_check)" | sudo tee -a /etc/exports
-    sudo exportfs -a
-fi
+# Function to process new OS version ISO
+process_os_version() {
+    os_file=$1
+    os_name=$(basename "$os_file" .iso | cut -d '-' -f1)
+    os_version=$(basename "$os_file" .iso | cut -d '-' -f2)
+    dest_dir="$local_images_dir/$os_name/$os_version"
 
-# Start and enable services
-sudo systemctl restart isc-dhcp-server
-sudo systemctl enable isc-dhcp-server
+    # Check if the OS base directory exists
+    if [[ ! -d "$local_images_dir/$os_name" ]]; then
+        echo "Base directory for $os_name does not exist. Please add the base OS first."
+        exit 1
+    fi
 
-# Start and enable TFTP service
-sudo systemctl restart tftpd-hpa
-sudo systemctl enable tftpd-hpa
+    # Create directory for OS version if it doesn't exist
+    mkdir -p "$dest_dir"
 
-# Firewall configuration
-sudo ufw allow 67/udp  # Allow DHCP
-sudo ufw allow $tftp_port/udp  # Allow TFTP on custom port
+    # Copy the OS version ISO to the designated directory
+    echo "Copying $os_file to $dest_dir..."
+    cp "$os_file" "$dest_dir/${os_name}_${os_version}.iso"
+}
 
-echo "PXE server setup complete. ISO file '$iso_name' should be saved in the directory specified."
+# Function to generate the iPXE boot configuration
+generate_ipxe_config() {
+    ipxe_file="/var/lib/tftpboot/boot.ipxe"
+    echo "#!ipxe" | sudo tee "$ipxe_file"
+    echo "set server_ip ${server_ip}" | sudo tee -a "$ipxe_file"
+    echo "set root_path http://\${server_ip}/os-images" | sudo tee -a "$ipxe_file"
+
+    # Add boot menu entries dynamically for each OS and version
+    for os_dir in "$local_images_dir"/*; do
+        os_name=$(basename "$os_dir")
+        for version_dir in "$os_dir"/*; do
+            if [[ -d $version_dir ]]; then
+                os_version=$(basename "$version_dir")
+                echo "menuentry ${os_name} ${os_version}" | sudo tee -a "$ipxe_file"
+                echo "kernel \${root_path}/${os_name}/${os_version}/vmlinuz" | sudo tee -a "$ipxe_file"
+                echo "initrd \${root_path}/${os_name}/${os_version}/initrd.img" | sudo tee -a "$ipxe_file"
+                echo "boot" | sudo tee -a "$ipxe_file"
+                echo " " | sudo tee -a "$ipxe_file"
+            fi
+        done
+    done
+}
+
+# Accept OS ISO or OS version ISO as an argument with -o or -n option
+while getopts "o:n:" opt; do
+    case "$opt" in
+        o) os_file=$OPTARG
+           process_os_iso "$os_file"
+           ;;
+        n) os_file=$OPTARG
+           process_os_version "$os_file"
+           ;;
+        *) echo "Usage: $0 -o <osfilename.iso> for new OS or -n <osfilename-version.iso> for new version"; exit 1 ;;
+    esac
+done
+
+# Create the local images directory if it doesn't exist
+mkdir -p "$local_images_dir"
+
+# Execute functions
+install_required_services
+check_port_conflicts
+
+# Create dnsmasq configuration for PXE
+cat <<EOF | sudo tee /etc/dnsmasq.d/pxe.conf
+interface=$interface
+dhcp-range=$server_ip,proxy
+dhcp-boot=boot.ipxe
+enable-tftp
+tftp-root=/var/lib/tftpboot
+EOF
+
+# Link OS directory to HTTP server
+sudo ln -sf "$local_images_dir" /var/www/html/os-images
+sudo systemctl restart dnsmasq
+sudo systemctl restart httpd
+
+# Generate the iPXE boot configuration
+generate_ipxe_config
+
+echo "PXE server is configured. You can add more OS or OS versions with:"
+echo "  $0 -o <osfilename.iso> for a new OS"
+echo "  $0 -n <osfilename-version.iso> for a new version"
