@@ -9,6 +9,34 @@ check_port() {
     fi
 }
 
+# Function to ensure a package is installed
+install_package() {
+    package=$1
+    if ! dpkg -l | grep -qw $package; then
+        echo "Installing $package..."
+        sudo apt install -y $package
+    fi
+}
+
+# Function to remove lock files (if necessary)
+remove_lock_files() {
+    echo "Removing lock files if they exist..."
+    sudo rm -f /var/lib/dpkg/lock-frontend
+    sudo rm -f /var/lib/dpkg/lock
+    sudo rm -f /var/cache/apt/archives/lock
+}
+
+# Function to check if dpkg is running
+check_dpkg_lock() {
+    while sudo lsof /var/lib/dpkg/lock-frontend >/dev/null; do
+        echo "Another package manager is running. Waiting..."
+        sleep 5
+    done
+}
+
+# Check for package manager lock
+check_dpkg_lock
+
 # Check if necessary ports are available
 check_port 67  # DHCP
 check_port 69  # TFTP
@@ -22,11 +50,15 @@ read -p "Enter the network interface name (e.g., ens33): " interface
 read -p "Enter the server IP address (e.g., 172.17.199.199): " server_ip
 read -p "Enter the name of the ISO file to be saved (without extension): " iso_name
 
-# Define DHCP configuration
+# Install required packages
+install_package "isc-dhcp-server"
+install_package "tftpd-hpa"
+install_package "syslinux"
+
+# Backup existing configuration files
 dhcp_conf="/etc/dhcp/dhcpd.conf"
 tftp_conf="/etc/default/tftpd-hpa"
 
-# Backup existing configuration files
 sudo cp $dhcp_conf ${dhcp_conf}.bak
 sudo cp $tftp_conf ${tftp_conf}.bak
 
@@ -56,6 +88,8 @@ EOL
 sudo mkdir -p /var/lib/tftpboot
 sudo cp /usr/lib/syslinux/pxelinux.0 /var/lib/tftpboot/
 sudo cp /usr/lib/syslinux/ldlinux.c32 /var/lib/tftpboot/
+sudo cp /usr/lib/syslinux/modules/bios/libutil.c32 /var/lib/tftpboot/
+sudo cp /usr/lib/syslinux/modules/bios/menu.c32 /var/lib/tftpboot/
 sudo mkdir -p /var/lib/tftpboot/pxelinux.cfg
 sudo touch /var/lib/tftpboot/pxelinux.cfg/default
 
@@ -80,10 +114,10 @@ fi
 # Start and enable services
 sudo systemctl restart isc-dhcp-server
 sudo systemctl enable isc-dhcp-server
+
+# Start and enable TFTP service
 sudo systemctl restart tftpd-hpa
 sudo systemctl enable tftpd-hpa
-sudo systemctl restart nfs-kernel-server
-sudo systemctl enable nfs-kernel-server
 
 # Firewall configuration
 sudo ufw allow 67/udp  # Allow DHCP
