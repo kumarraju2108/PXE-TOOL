@@ -3,24 +3,50 @@
 # Function to install required packages
 install_packages() {
     echo "Updating and installing packages..."
-    sudo apt update
-    sudo apt install -y dnsmasq tftpd-hpa syslinux-common shim-signed grub-efi-amd64-signed grub-common
+    if ! sudo apt update; then
+        echo "Failed to update package list."
+        exit 1
+    fi
+    if ! sudo apt install -y dnsmasq tftpd-hpa syslinux-common shim-signed grub-efi-amd64-signed grub-common; then
+        echo "Failed to install required packages."
+        exit 1
+    fi
 }
 
 # Function to configure dnsmasq
 configure_dnsmasq() {
     echo "Configuring dnsmasq..."
 
-    # Prompt for interface and IP range
-    read -p "Enter network interface (e.g., eth0): " interface
-    read -p "Enter PXE IP range start (e.g., 192.168.0.100): " ip_start
-    read -p "Enter PXE IP range end (e.g., 192.168.0.200): " ip_end
+    # Prompt for network interface and validate
+    while true; do
+        read -p "Enter network interface (e.g., eth0): " interface
+        if ip link show "$interface" &> /dev/null; then
+            break
+        else
+            echo "Invalid interface name. Please try again."
+        fi
+    done
 
-    # Configure dnsmasq for PXE booting
+    # Prompt for IP range and validate
+    while true; do
+        read -p "Enter PXE IP range start (e.g., 192.168.0.100): " ip_start
+        read -p "Enter PXE IP range end (e.g., 192.168.0.200): " ip_end
+
+        # Validate IP addresses
+        if [[ "$ip_start" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$ip_end" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            break
+        else
+            echo "Invalid IP address format. Please try again."
+        fi
+    done
+
+    # Backup existing dnsmasq configuration
+    sudo cp /etc/dnsmasq.conf.d/pxe.conf /etc/dnsmasq.conf.d/pxe.conf.bak 2>/dev/null
+
     cat <<EOF | sudo tee /etc/dnsmasq.conf.d/pxe.conf
 interface=${interface},lo
 bind-interfaces
-dhcp-range=${interface},${ip_start},${ip_end}
+dhcp-range=${ip_start},${ip_end}
 dhcp-boot=pxelinux.0
 dhcp-match=set:efi-x86_64,option:client-arch,7
 dhcp-boot=tag:efi-x86_64,bootx64.efi
@@ -28,8 +54,10 @@ enable-tftp
 tftp-root=/srv/tftp
 EOF
 
-    # Restart dnsmasq service
-    sudo systemctl restart dnsmasq.service
+    if ! sudo systemctl restart dnsmasq.service; then
+        echo "Failed to restart dnsmasq service."
+        exit 1
+    fi
     echo "dnsmasq configured and restarted."
 }
 
@@ -37,28 +65,34 @@ EOF
 download_pxe_files() {
     echo "Downloading necessary PXE files..."
 
-    # Create necessary directories
     sudo mkdir -p /srv/tftp/boot-amd64 /srv/tftp/pxelinux.cfg
 
-    # Download PXE bootloader and GRUB font
-    sudo wget -q http://archive.ubuntu.com/ubuntu/dists/focal/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/pxelinux.0 -O /srv/tftp/pxelinux.0
+    if ! sudo wget -q http://archive.ubuntu.com/ubuntu/dists/focal/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/pxelinux.0 -O /srv/tftp/pxelinux.0; then
+        echo "Failed to download pxelinux.0."
+        exit 1
+    fi
+
     sudo cp /usr/lib/syslinux/modules/bios/ldlinux.c32 /srv/tftp/
-    apt download grub-common && dpkg-deb --fsys-tarfile grub-common*.deb | sudo tar x ./usr/share/grub/unicode.pf2 -O > /srv/tftp/unicode.pf2
+
+    if ! apt download grub-common && dpkg-deb --fsys-tarfile grub-common*.deb | sudo tar x ./usr/share/grub/unicode.pf2 -O > /srv/tftp/unicode.pf2; then
+        echo "Failed to extract unicode.pf2."
+        exit 1
+    fi
 
     echo "PXE files downloaded."
 }
 
-# Function to configure GRUB with or without OS URL
+# Function to configure GRUB
 configure_grub() {
     echo "Configuring GRUB for PXE..."
 
-    # Ask if OS URL should be included for automatic download
     read -p "Do you want to include an OS ISO download URL? (y/n): " include_url
 
-    if [ "$include_url" == "y" ]; then
-        read -p "Enter the OS ISO download URL (e.g., http://cdimage.ubuntu.com/ubuntu/releases/20.04.5/release/ubuntu-20.04.5-live-server-amd64.iso): " os_url
+    sudo mkdir -p /srv/tftp/grub
 
-        # Create GRUB config with OS download URL
+    if [ "$include_url" == "y" ]; then
+        read -p "Enter the OS ISO download URL: " os_url
+
         cat <<EOF | sudo tee /srv/tftp/grub/grub.cfg
 set default="0"
 set timeout=-1
@@ -82,7 +116,6 @@ EOF
 
         echo "GRUB configured with OS download URL."
     else
-        # Create GRUB config without OS download URL
         cat <<EOF | sudo tee /srv/tftp/grub/grub.cfg
 set default="0"
 set timeout=-1
