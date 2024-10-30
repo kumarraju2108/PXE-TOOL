@@ -86,9 +86,15 @@ download_pxe_files() {
 
     sudo mkdir -p /srv/tftp/boot-amd64 /srv/tftp/pxelinux.cfg
 
-    if ! sudo wget -q http://archive.ubuntu.com/ubuntu/dists/focal/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/pxelinux.0 -O /srv/tftp/pxelinux.0; then
-        echo "Failed to download pxelinux.0."
-        exit 1
+    # Attempt to download pxelinux.0
+    if ! wget -q http://archive.ubuntu.com/ubuntu/dists/focal/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/pxelinux.0 -O /srv/tftp/pxelinux.0; then
+        echo "Failed to download pxelinux.0. Attempting to copy from local syslinux installation."
+        if [ -f /usr/lib/syslinux/pxelinux.0 ]; then
+            sudo cp /usr/lib/syslinux/pxelinux.0 /srv/tftp/
+        else
+            echo "Local pxelinux.0 not found. Please check syslinux installation."
+            exit 1
+        fi
     fi
 
     sudo cp /usr/lib/syslinux/modules/bios/ldlinux.c32 /srv/tftp/
