@@ -89,16 +89,19 @@ download_pxe_files() {
     # Attempt to download pxelinux.0
     if ! wget -q http://archive.ubuntu.com/ubuntu/dists/focal/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/pxelinux.0 -O /srv/tftp/pxelinux.0; then
         echo "Failed to download pxelinux.0. Attempting to copy from local syslinux installation."
-        if [ -f /usr/lib/syslinux/pxelinux.0 ]; then
-            sudo cp /usr/lib/syslinux/pxelinux.0 /srv/tftp/
+        local_pxelinux_path=$(find /usr/lib/syslinux -name pxelinux.0 | head -n 1)  # Find local path
+        if [ -f "$local_pxelinux_path" ]; then
+            sudo cp "$local_pxelinux_path" /srv/tftp/
         else
             echo "Local pxelinux.0 not found. Please check syslinux installation."
             exit 1
         fi
     fi
 
+    # Copy ldlinux.c32
     sudo cp /usr/lib/syslinux/modules/bios/ldlinux.c32 /srv/tftp/
 
+    # Download unicode.pf2
     if ! apt download grub-common && dpkg-deb --fsys-tarfile grub-common*.deb | sudo tar x ./usr/share/grub/unicode.pf2 -O > /srv/tftp/unicode.pf2; then
         echo "Failed to extract unicode.pf2."
         exit 1
