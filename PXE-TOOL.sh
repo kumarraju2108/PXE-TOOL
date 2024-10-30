@@ -13,6 +13,24 @@ install_packages() {
     fi
 }
 
+# Function to configure UFW to allow necessary ports
+configure_firewall() {
+    echo "Configuring firewall..."
+
+    # Allow necessary ports for dnsmasq and tftp
+    sudo ufw allow 1053/tcp  # DNS port for dnsmasq
+    sudo ufw allow 1053/udp  # DNS port for dnsmasq
+    sudo ufw allow 69/udp     # TFTP port
+
+    # Enable UFW if it's not already enabled
+    if ! sudo ufw status | grep -q "Status: active"; then
+        echo "Enabling UFW..."
+        sudo ufw enable
+    fi
+
+    echo "Firewall configured."
+}
+
 # Function to configure dnsmasq
 configure_dnsmasq() {
     echo "Configuring dnsmasq..."
@@ -46,6 +64,7 @@ configure_dnsmasq() {
     cat <<EOF | sudo tee /etc/dnsmasq.conf.d/pxe.conf
 interface=${interface},lo
 bind-interfaces
+port=1053  # Change DNS port
 dhcp-range=${ip_start},${ip_end}
 dhcp-boot=pxelinux.0
 dhcp-match=set:efi-x86_64,option:client-arch,7
@@ -143,6 +162,7 @@ EOF
 # Main function
 main() {
     install_packages
+    configure_firewall
     configure_dnsmasq
     download_pxe_files
     configure_grub
